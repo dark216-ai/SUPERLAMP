@@ -2,10 +2,10 @@
 #
 # lampfm.sh — LAMP + FM + Node.js Stack Installer & Service Manager
 #
-# Installs: apache2, mysql-server, php, phpmyadmin, python3, lftp, vsftpd,
-#            postfix, git, build-essential, curl, nodejs
-# Manages services: install, status, start, stop, restart, enable, disable
-# Developer helpers: newsite, vhost add
+# Installs or manages: Apache2, MySQL/MariaDB, PHP, phpMyAdmin, Python3, LFTP, vsftpd,
+# Postfix, Git, build-essential, curl, Node.js LTS.
+# Provides commands: install, status packages/services, start/stop/restart/enable/disable,
+# newsite, vhost add.
 #
 
 set -euo pipefail
@@ -14,11 +14,17 @@ IFS=$'\n\t'
 LOGFILE="/var/log/lampfm.log"
 DATEFMT="+%Y-%m-%d %H:%M:%S"
 
-# ─── Colors ───────────────────────────────────────────────────────────────
+# Colors
 RED="\e[31m"; GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RESET="\e[0m"
 
-# ─── Components & Packages ───────────────────────────────────────────────
+# Ensure log file exists
+mkdir -p "$(dirname "$LOGFILE")"
+: >"$LOGFILE"
+
+# Components in order
+COMP_ORDER=(dev_tools apache2 database php phpmyadmin python ftp_client ftp_server mail git nodejs)
 declare -A COMPONENTS=(
+  [dev_tools]="build-essential curl"
   [apache2]="apache2"
   [database]="mysql-server"
   [php]="php libapache2-mod-php php-mysql php-cli"
@@ -28,53 +34,54 @@ declare -A COMPONENTS=(
   [ftp_server]="vsftpd"
   [mail]="postfix"
   [git]="git"
-  [dev_tools]="build-essential curl"
   [nodejs]="nodejs"
 )
 
 SERVICES=(apache2 mysql vsftpd postfix)
 
-# ─── Logging ─────────────────────────────────────────────────────────────
+# Logging
 log() {
-  local lvl="$1"; shift
-  printf "%s [%s] %s\n" "$(date "$DATEFMT")" "$lvl" "$*" \
+  local level="$1"; shift
+  printf "%s [%s] %s\n" "$(date "$DATEFMT")" "$level" "$*" \
     | tee -a "$LOGFILE"
 }
 info()  { log INFO "$*"; }
 error() { log ERROR "$*"; echo -e "${RED}ERROR:${RESET} $*"; }
 
-# ─── Pre-checks ───────────────────────────────────────────────────────────
+# Pre-checks
 pre_checks() {
-  [ "$EUID" -ne 0 ] && { error "Run as root"; exit 1; }
-  ping -c1 8.8.8.8 &>/dev/null || { error "No network"; exit 1; }
+  [ "$EUID" -ne 0 ] && { error "This script must be run as root"; exit 1; }
+  ping -c1 1.1.1.1 &>/dev/null || { error "No network connection"; exit 1; }
 }
 
-# ─── System Update/Upgrade/Cleanup ────────────────────────────────────────
+# System maintenance
 update_system() {
   info "Updating package index"
   apt-get update -qq
   info "Upgrading installed packages"
   DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
-  info "Performing dist-upgrade"
+  info "Dist-upgrade"
   DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq
-  info "Removing unused packages"
+  info "Autoremove unused packages"
   apt-get autoremove -y -qq
-  info "Cleaning package cache"
+  info "Autoclean cache"
   apt-get autoclean -qq
 }
 
-# ─── External Repos ──────────────────────────────────────────────────────
+# Add NodeSource repo
 add_node_repo() {
-  info "Adding NodeSource repository for Node.js LTS"
-  curl -fsSL https://deb.nodesource.com/setup_18.x | bash - &>>"$LOGFILE"
+  if ! grep -q "nodesource" /etc/apt/sources.list.d/nodesource.list 2>/dev/null; then
+    info "Adding NodeSource repository"
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - &>>"$LOGFILE"
+  fi
 }
 
-# ─── Install All Missing Components ──────────────────────────────────────
+# Install all missing components
 install_all() {
   update_system
-  info "Installing missing components..."
-  for comp in "${!COMPONENTS[@]}"; do
-    [[ "$comp" == "nodejs" ]] && add_node_repo
+  info "Installing missing components"
+  for comp in "${COMP_ORDER[@]}"; do
+    [ "$comp" = nodejs ] && add_node_repo
     for pkg in ${COMPONENTS[$comp]}; do
       if ! dpkg -s "$pkg" &>/dev/null; then
         info "Installing $pkg"
@@ -91,10 +98,10 @@ install_all() {
   echo -e "${GREEN}All components installed and configured.${RESET}"
 }
 
-# ─── Package Status ──────────────────────────────────────────────────────
+# Show package status
 status_packages() {
   echo "Package status:"
-  for comp in "${!COMPONENTS[@]}"; do
+  for comp in "${COMP_ORDER[@]}"; do
     for pkg in ${COMPONENTS[$comp]}; do
       if dpkg -s "$pkg" &>/dev/null; then
         printf "  [${GREEN}OK${RESET}] %s\n" "$pkg"
@@ -105,59 +112,58 @@ status_packages() {
   done
 }
 
-# ─── Service Status ──────────────────────────────────────────────────────
+# Show service status
 status_services() {
   echo "Service status:"
   for svc in "${SERVICES[@]}"; do
     if systemctl list-unit-files | grep -q "^${svc}.service"; then
-      local s=$(systemctl is-active "$svc")
-      local e=$(systemctl is-enabled "$svc" 2>/dev/null || echo disabled)
-      printf "  %s: %s (boot: %s)\n" \
+      local state=$(systemctl is-active "$svc")
+      local enable=$(systemctl is-enabled "$svc" 2>/dev/null || echo disabled)
+      printf "  %s: %-8s (boot: %s)\n" \
         "$svc" \
-        "$( [[ $s == active ]] && echo "${GREEN}running${RESET}" || echo "${RED}stopped${RESET}" )" \
-        "$e"
+        "$( [[ $state == active ]] && echo "${GREEN}running${RESET}" || echo "${RED}stopped${RESET}" )" \
+        "$enable"
     else
       printf "  %s: ${YELLOW}not installed${RESET}\n" "$svc"
     fi
   done
 }
 
-# ─── Service Control ─────────────────────────────────────────────────────
+# Service control
 svc_action() {
-  local act="$1"; local svc="$2"
+  local act="$1" svc="$2"
   if ! systemctl list-unit-files | grep -q "^${svc}.service"; then
-    error "Service '$svc' not found"
-    return 1
+    error "Service '$svc' not found"; return 1
   fi
-  info "${act^}ing $svc"
-  systemctl "$act" "$svc"
+  info "${act^}ing $svc"; systemctl "$act" "$svc"
   echo -e "${GREEN}$svc ${act}ed${RESET}"
 }
 
-# ─── Scaffold New Site ───────────────────────────────────────────────────
+# Scaffold new site
 newsite() {
-  local name="$1"; local dir="/var/www/html/$name"
-  [ -d "$dir" ] && { error "Site '$name' exists"; return 1; }
+  local name="$1"
+  local dir="/var/www/html/$name"
+  [ -d "$dir" ] && { error "Site '$name' already exists"; return 1; }
   mkdir -p "$dir"
   cat >"$dir/index.php" <<EOF
 <?php
 phpinfo();
 EOF
-  cat >"$dir/index.py" <<\PY
+  cat >"$dir/index.py" <<EOF
 #!/usr/bin/env python3
 print("Content-Type: text/plain\n")
 print("Hello from $name")
-PY
+EOF
   chmod +x "$dir/index.py"
   chown -R www-data:www-data "$dir"
-  echo -e "${GREEN}New site created at $dir${RESET}"
+  echo -e "${GREEN}Site '$name' created at $dir${RESET}"
 }
 
-# ─── Add Apache Virtual Host ─────────────────────────────────────────────
+# Add Apache virtual host
 vhost_add() {
-  local domain="$1"; local path="$2"
+  local domain="$1" path="$2"
   local conf="/etc/apache2/sites-available/$domain.conf"
-  [ -f "$conf" ] && { error "vhost '$domain' already exists"; return 1; }
+  [ -f "$conf" ] && { error "vhost '$domain' exists"; return 1; }
   cat >"$conf" <<EOF
 <VirtualHost *:80>
   ServerName $domain
@@ -176,13 +182,13 @@ EOF
   echo -e "${GREEN}vhost '$domain' enabled${RESET}"
 }
 
-# ─── Usage/Help ──────────────────────────────────────────────────────────
+# Usage
 usage() {
   cat <<EOF
 Usage: sudo $0 <command> [args]
 
 Commands:
-  install                     Install/update all components
+  install                     Install all missing components
   status packages             Show installed/missing packages
   status services             Show running/stopped services
   start <service>             Start a service (apache2, mysql, vsftpd, postfix)
@@ -193,35 +199,27 @@ Commands:
   newsite <name>              Scaffold /var/www/html/<name>
   vhost add <domain> <path>   Create & enable Apache vhost
   help                        Show this help message
-
-Examples:
-  sudo $0 install
-  sudo $0 status services
-  sudo $0 start apache2
-  sudo $0 newsite myproject
-  sudo $0 vhost add myproject.local /var/www/html/myproject
 EOF
 }
 
-# ─── Main ────────────────────────────────────────────────────────────────
+# Main
 main() {
   pre_checks
   case "${1:-help}" in
-    install)            install_all ;;
+    install)                install_all ;;
     status)
       case "${2:-}" in
-        packages)      status_packages ;;
-        services)      status_services ;;
-        *)             usage ;;
+        packages)           status_packages ;;
+        services)           status_services ;;
+        *)                  usage ;;
       esac ;;
     start|stop|restart|enable|disable)
-                         svc_action "$1" "$2" ;;
-    newsite)            newsite "$2" ;;
+                            svc_action "$1" "$2" ;;
+    newsite)                newsite "$2" ;;
     vhost)
-      [[ "$2" == "add" ]] && vhost_add "$3" "$4" || usage
-      ;;
-    help|--help|-h)     usage ;;
-    *)                  usage ;;
+      [ "${2:-}" = add ] && vhost_add "$3" "$4" || usage ;;
+    help|--help|-h)         usage ;;
+    *)                      usage ;;
   esac
 }
 
