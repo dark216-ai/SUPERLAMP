@@ -1,7 +1,7 @@
 # LAMPFM — All-in-One LAMP + FM Stack Installer & Service Manager
 #### Author: Bocaletto Luca
 
-LAMPFM is a Bash “app” for Debian/Ubuntu that automates installation of a full LAMP stack plus FTP & Mail (FM), and provides an interactive service manager for developers.
+LAMPFM is a Bash “app” for Debian/Ubuntu that automates installation of a full LAMP stack plus FTP & Mail (FM), Node, and provides an interactive service manager for developers.
 
 ---
 
@@ -15,7 +15,8 @@ LAMPFM is a Bash “app” for Debian/Ubuntu that automates installation of a fu
   • Python 3 & pip  
   • FTP client (`lftp`) & server (`vsftpd`)  
   • Mail server (`postfix`)  
-  • Git version control  
+  • Git version control
+  • Node.js
 
 - **Service Manager**  
   • Detect which components are installed  
