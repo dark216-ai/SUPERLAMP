@@ -1,7 +1,7 @@
 # SUPERLAMP — All-in-One LAMP + SUPER Stack Installer & Service Manager
 #### Author: Bocaletto Luca
 
-LAMPFM is a Bash “app” for Debian/Ubuntu that automates installation of a full LAMP stack plus FTP & Mail (FM), Node, and provides an interactive service manager for developers.
+SUPERLAMP is a Bash “app” for Debian/Ubuntu that automates installation of a full LAMP stack plus FTP & Mail (FM), Node, and provides an interactive service manager for developers.
 
 ---
 
