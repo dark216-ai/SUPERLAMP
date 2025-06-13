@@ -1,22 +1,84 @@
 #!/usr/bin/env bash
 #
-# lampfm.sh — LAMP + FM + Node.js + Dev Tools Installer & TUI Manager
-# Implements: getopts, auto service mapping, whiptail TUI, DB wizard,
-# SSL automation, firewall (ufw & fail2ban), Composer, NVM, Docker.
+# superlamp.sh — The Ultimate LAMP + FM + DevOps Stack Installer & Manager
+#
+# Installs or manages: Apache2, MySQL/MariaDB, PHP, phpMyAdmin, Python3,
+#  LFTP, vsftpd, Postfix, Git, build-essential, curl, Node.js LTS, Composer,
+#  NVM, Docker, UFW, Fail2Ban, Certbot.
+# Provides an ncurses menu, getopts flags, logging, dry‐run & verbose modes.
 #
 
 set -euo pipefail
 IFS=$'\n\t'
 
-LOGFILE="/var/log/lampfm.log"
+SCRIPT_NAME=$(basename "$0")
+LOGFILE="/var/log/superlamp.log"
 DATEFMT="+%Y-%m-%d %H:%M:%S"
+
 DRY_RUN=0
 VERBOSE=0
 
-# Colors
+# ─── Colors ─────────────────────────────────────────────────────────────────
 RED="\e[31m"; GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RESET="\e[0m"
 
-# Components: name|apt-packages
+# ─── Ensure log file & rotate if >5MB ─────────────────────────────────────
+init_log() {
+  mkdir -p "$(dirname "$LOGFILE")"
+  if [ -f "$LOGFILE" ] && [ "$(stat -c%s "$LOGFILE")" -gt $((5*1024*1024)) ]; then
+    mv "$LOGFILE" "$LOGFILE.$(date +%s)"
+  fi
+  : >"$LOGFILE"
+}
+
+# ─── Logging Helpers ───────────────────────────────────────────────────────
+log() {
+  local level="$1"; shift
+  printf "%s [%5s] %s\n" "$(date "$DATEFMT")" "$level" "$*" \
+    | tee -a "$LOGFILE"
+}
+info()  { log INFO  "$*"; [[ $VERBOSE -eq 1 ]] && echo -e "${BLUE}$*${RESET}"; }
+warn()  { log WARN  "$*"; echo -e "${YELLOW}WARN: $*${RESET}"; }
+error() { log ERROR "$*"; echo -e "${RED}ERROR: $*${RESET}"; }
+
+# ─── Dry‐Run Wrapper ────────────────────────────────────────────────────────
+run() {
+  local cmd="$*"
+  if [ $DRY_RUN -eq 1 ]; then
+    echo "[DRY-RUN] $cmd"
+  else
+    eval "$cmd"
+  fi
+}
+
+# ─── Pre‐checks ────────────────────────────────────────────────────────────
+pre_checks() {
+  init_log
+  [ "$EUID" -ne 0 ] && error "Run as root" && exit 1
+  ping -c1 1.1.1.1 &>/dev/null || error "No network" && exit 1
+  command -v whiptail &>/dev/null || run "apt-get update -qq && apt-get install -y -qq whiptail"
+}
+
+# ─── System Maintenance ────────────────────────────────────────────────────
+update_system() {
+  info "Updating package index"
+  run "apt-get update -qq"
+  info "Upgrading installed packages"
+  run "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq"
+  info "Performing dist-upgrade"
+  run "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq"
+  info "Autoremoving unused packages"
+  run "apt-get autoremove -y -qq"
+  info "Cleaning package cache"
+  run "apt-get autoclean -qq"
+}
+
+# ─── Add External Repos ─────────────────────────────────────────────────────
+add_node_repo() {
+  info "Adding NodeSource LTS repo"
+  run "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -"
+}
+
+# ─── Components & Services ─────────────────────────────────────────────────
 COMPONENTS=(
   "Apache2|apache2"
   "Database|mysql-server"
@@ -34,181 +96,144 @@ COMPONENTS=(
   "Docker|docker.io docker-compose"
   "Firewall|ufw"
   "Fail2Ban|fail2ban"
-  "SSL (Certbot)|certbot python3-certbot-apache"
+  "SSL & Certbot|certbot python3-certbot-apache"
 )
-
-# Automatically discovered services from installed components
 declare -A SERVICE_MAP=(
   [apache2]="apache2"
   [mysql-server]="mysql"
   [vsftpd]="vsftpd"
   [postfix]="postfix"
   [docker.io]="docker"
-  [fail2ban]="fail2ban"
   [ufw]="ufw"
+  [fail2ban]="fail2ban"
 )
 
-# Logging
-log() {
-  local lvl="$1"; shift
-  printf "%s [%s] %s\n" "$(date "$DATEFMT")" "$lvl" "$*" \
-    | tee -a "$LOGFILE"
-}
-info()  { log INFO "$*"; ((VERBOSE)) && echo -e "${BLUE}$*${RESET}"; }
-error() { log ERROR "$*"; echo -e "${RED}ERROR: $*${RESET}"; }
-
-# Pre‐checks
-pre_checks() {
-  [ "$EUID" -ne 0 ] && { error "Run as root"; exit 1; }
-  ping -c1 1.1.1.1 &>/dev/null || { error "No network"; exit 1; }
-  command -v whiptail &>/dev/null || apt-get update -qq && apt-get install -y -qq whiptail
-}
-
-# System update & upgrade
-update_system() {
-  info "Updating package index..."
-  $dry_apt_update
-  info "Upgrading packages..."
-  $dry_apt_upgrade
-}
-
-# Dry-run wrappers
-dry_apt_update="apt-get update -qq"
-dry_apt_upgrade="DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq"
-dry_install="apt-get install -y -qq"
-run_or_dry() {
-  if (( DRY_RUN )); then
-    echo "[DRY-RUN] $*"
-  else
-    eval "$*"
-  fi
-}
-
-# Add NodeSource repo for Node.js LTS
-add_node_repo() {
-  info "Adding Node.js LTS repo"
-  run_or_dry "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -"
-}
-
-# Install selected components
+# ─── TUI: Install Components ────────────────────────────────────────────────
 install_components() {
-  local sel pkgs comp
-  sel=$(whiptail --title "LAMPFM Installer" --checklist \
-    "Select components to install" 20 80 14 \
-    $(for c in "${COMPONENTS[@]}"; do
-        name="${c%%|*}"; pkgs="${c#*|}"
-        echo "\"$name\" \"${pkgs%% *}\" off"
-     done) 3>&1 1>&2 2>&3) || return
+  local choices=()
+  for item in "${COMPONENTS[@]}"; do
+    local name="${item%%|*}"
+    choices+=( "$name" "$name" off )
+  done
+  local sel=$(whiptail --separate-output --title "Select Components" \
+    --checklist "Use SPACE to select, ENTER to confirm" 20 60 16 \
+    "${choices[@]}" 3>&1 1>&2 2>&3) || return
+
   update_system
-  for comp in $sel; do
-    for entry in "${COMPONENTS[@]}"; do
-      name="${entry%%|*}"; pkgs="${entry#*|}"
-      if [[ "$name" == "$comp" ]]; then
-        info "Installing $name"
-        [[ "$name" == "Node.js" ]] && add_node_repo
-        for pkg in $pkgs; do
-          if dpkg -s "$pkg" &>/dev/null; then
-            info "$pkg already installed"
-          else
-            run_or_dry "$dry_install $pkg"
-          fi
-        done
-        break
-      fi
+  for name in $sel; do
+    for item in "${COMPONENTS[@]}"; do
+      [[ "${item%%|*}" == "$name" ]] || continue
+      local pkgs="${item#*|}"
+      info "Installing $name"
+      [[ "$name" == "Node.js" ]] && add_node_repo
+      for pkg in $pkgs; do
+        if dpkg -s "$pkg" &>/dev/null; then
+          info "  $pkg already installed"
+        else
+          run "apt-get install -y -qq $pkg"
+        fi
+      done
+      break
     done
   done
-  info "Enabling Apache mod_rewrite"
-  run_or_dry "a2enmod rewrite"
-  run_or_dry "systemctl reload apache2"
+
+  info "Enabling Apache rewrite"
+  run "a2enmod rewrite"
+  run "systemctl reload apache2"
+  whiptail --msgbox "Installation complete!" 8 40
 }
 
-# Virtual host SSL automation
+# ─── TUI: Manage Services ───────────────────────────────────────────────────
+manage_services() {
+  local choices=()
+  for pkg in "${!SERVICE_MAP[@]}"; do
+    local svc=${SERVICE_MAP[$pkg]}
+    dpkg -s "$pkg" &>/dev/null || continue
+    local state=$(systemctl is-active "$svc")
+    choices+=( "$svc" "$svc [$state]" off )
+  done
+  local sel=$(whiptail --separate-output --title "Service Manager" \
+    --checklist "Select services" 20 60 12 "${choices[@]}" 3>&1 1>&2 2>&3) || return
+
+  local act=$(whiptail --title "Choose Action" --menu "Action" 10 40 4 \
+    start "Start" stop "Stop" restart "Restart" 3>&1 1>&2 2>&3) || return
+
+  for svc in $sel; do
+    info "$act $svc"
+    run "systemctl $act $svc"
+  done
+  whiptail --msgbox "Services updated." 8 40
+}
+
+# ─── TUI: Database Wizard ──────────────────────────────────────────────────
+db_wizard() {
+  local user=$(whiptail --inputbox "DB username:" 8 40 3>&1 1>&2 2>&3) || return
+  local pass=$(whiptail --passwordbox "DB password:" 8 40 3>&1 1>&2 2>&3) || return
+  local db  =$(whiptail --inputbox "DB name:" 8 40 3>&1 1>&2 2>&3) || return
+  info "Creating database/user"
+  run "mysql -e \"CREATE DATABASE \\\`$db\\\`; \
+    CREATE USER '$user'@'localhost' IDENTIFIED BY '$pass'; \
+    GRANT ALL ON \\\`$db\\\`.* TO '$user'@'localhost'; FLUSH PRIVILEGES;\""
+  whiptail --msgbox "Database '$db' and user '$user' created." 8 50
+}
+
+# ─── TUI: SSL Setup via Certbot ────────────────────────────────────────────
 setup_ssl() {
-  local domain
-  domain=$(whiptail --inputbox "Enter your domain for SSL (example.com)" 8 60 3>&1 1>&2 2>&3) || return
-  info "Obtaining SSL cert for $domain"
-  run_or_dry "certbot --apache -d $domain --non-interactive --agree-tos -m admin@$domain"
+  local domain=$(whiptail --inputbox "Domain for SSL (e.g. example.com):" 8 60 3>&1 1>&2 2>&3) || return
+  info "Issuing certificate for $domain"
+  run "certbot --apache -d $domain --non-interactive --agree-tos -m admin@$domain"
+  whiptail --msgbox "SSL enabled for $domain." 8 50
 }
 
-# Firewall & Fail2Ban
+# ─── TUI: Firewall & Fail2Ban ──────────────────────────────────────────────
 configure_firewall() {
   info "Configuring UFW"
-  run_or_dry "ufw allow OpenSSH"
-  run_or_dry "ufw allow 'WWW Full'"
-  run_or_dry "ufw allow ftp"
-  run_or_dry "ufw enable"
+  run "ufw allow OpenSSH"
+  run "ufw allow 'WWW Full'"
+  run "ufw allow ftp"
+  run "ufw --force enable"
 }
 configure_fail2ban() {
   info "Enabling Fail2Ban"
-  run_or_dry "systemctl enable fail2ban"
-  run_or_dry "systemctl start fail2ban"
+  run "systemctl enable fail2ban"
+  run "systemctl start fail2ban"
+  whiptail --msgbox "Firewall & Fail2Ban configured." 8 40
 }
 
-# Database wizard
-db_wizard() {
-  local user pass db
-  user=$(whiptail --inputbox "New DB username" 8 40 3>&1 1>&2 2>&3) || return
-  pass=$(whiptail --passwordbox "Password for $user" 8 40 3>&1 1>&2 2>&3) || return
-  db=$(whiptail --inputbox "Database name" 8 40 3>&1 1>&2 2>&3) || return
-  info "Creating database & user"
-  run_or_dry "mysql -e \"CREATE DATABASE \\\`$db\\\`; GRANT ALL ON \\\`$db\\\`.* TO '$user'@'localhost' IDENTIFIED BY '$pass'; FLUSH PRIVILEGES;\""
-}
-
-# Composer & NVM
+# ─── TUI: Composer & NVM ───────────────────────────────────────────────────
 install_composer() {
   info "Installing Composer"
-  run_or_dry "curl -sS https://getcomposer.org/installer | php"
-  run_or_dry "mv composer.phar /usr/local/bin/composer"
+  run "curl -sS https://getcomposer.org/installer | php"
+  run "mv composer.phar /usr/local/bin/composer"
 }
 install_nvm() {
   info "Installing NVM"
-  run_or_dry "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.3/install.sh | bash"
+  run "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.3/install.sh | bash"
+  whiptail --msgbox "NVM installed. Restart shell to use." 8 50
 }
 
-# Docker support
+# ─── TUI: Docker ──────────────────────────────────────────────────────────
 install_docker() {
   info "Installing Docker & Compose"
-  run_or_dry "apt-get install -y -qq docker.io docker-compose"
-  run_or_dry "systemctl enable docker"
-  run_or_dry "systemctl start docker"
+  run "apt-get install -y -qq docker.io docker-compose"
+  run "systemctl enable docker"
+  run "systemctl start docker"
+  whiptail --msgbox "Docker installed and running." 8 50
 }
 
-# Manage services using dialog
-manage_services() {
-  local choices sel svc act
-  # auto-discover services
-  choices=$(for s in "${!SERVICE_MAP[@]}"; do
-    pkg="$s"; svc="${SERVICE_MAP[$s]}"
-    if dpkg -s "$pkg" &>/dev/null; then
-      state=$(systemctl is-active "$svc")
-      echo "\"$svc\" \"$svc ($state)\" off"
-    fi
-  done)
-  sel=$(whiptail --title "Service Manager" --checklist \
-    "Select services to start/stop/restart" 20 70 10 $choices 3>&1 1>&2 2>&3) || return
-  act=$(whiptail --title "Action" --menu \
-    "Choose action for selected" 12 40 4 \
-    "start" "Start services" \
-    "stop" "Stop services" \
-    "restart" "Restart services" 3>&1 1>&2 2>&3) || return
-  for svc in $sel; do
-    info "$act $svc"
-    run_or_dry "systemctl $act $svc"
-  done
-}
-
-# Main menu
+# ─── Main Menu ────────────────────────────────────────────────────────────
 main_menu() {
   while true; do
-    choice=$(whiptail --title "LAMPFM Main Menu" --menu "Choose an option" 16 60 8 \
-      "1" "Install Components" \
-      "2" "Manage Services" \
-      "3" "DB Setup Wizard" \
-      "4" "SSL Setup (Certbot)" \
-      "5" "Configure Firewall & Fail2Ban" \
-      "6" "Install Composer & NVM" \
-      "7" "Install Docker" \
-      "8" "Exit" 3>&1 1>&2 2>&3) || exit
+    local choice=$(whiptail --clear --title "SUPERLAMP Main Menu" \
+      --menu "Select an option:" 18 60 10 \
+      1 "Install Components" \
+      2 "Manage Services" \
+      3 "Database Wizard" \
+      4 "SSL Setup (Certbot)" \
+      5 "Firewall & Fail2Ban" \
+      6 "Install Composer & NVM" \
+      7 "Install Docker" \
+      8 "Exit" 3>&1 1>&2 2>&3) || exit
     case "$choice" in
       1) install_components ;;
       2) manage_services ;;
@@ -222,19 +247,24 @@ main_menu() {
   done
 }
 
-# Parse options
-while getopts ":hnv-:" opt; do
-  case "$opt" in
-    h) echo "Usage: $0 [-n dry-run] [-v verbose]"; exit 0 ;;
-    n) DRY_RUN=1 ;;
-    v) VERBOSE=1 ;;
-    -)
-      case "${OPTARG}" in
-        dry-run) DRY_RUN=1 ;;
-        verbose) VERBOSE=1 ;;
-        help)    echo "Usage: $0 [--dry-run] [--verbose]"; exit 0 ;;
-      esac ;;
-    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+# ─── Option Parsing ────────────────────────────────────────────────────────
+usage() {
+  cat <<EOF
+Usage: sudo $SCRIPT_NAME [options]
+
+Options:
+  -n, --dry-run     Show commands without executing
+  -v, --verbose     Show verbose output
+  -h, --help        Display this help and exit
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|--dry-run)  DRY_RUN=1; shift ;;
+    -v|--verbose)  VERBOSE=1; shift ;;
+    -h|--help)     usage; exit 0 ;;
+    *)             echo "Unknown option: $1"; usage; exit 1 ;;
   esac
 done
 
