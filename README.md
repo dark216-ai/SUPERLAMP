@@ -1,4 +1,4 @@
-# LAMPFM — All-in-One LAMP + FM Stack Installer & Service Manager
+# SUPERLAMP — All-in-One LAMP + SUPER Stack Installer & Service Manager
 #### Author: Bocaletto Luca
 
 LAMPFM is a Bash “app” for Debian/Ubuntu that automates installation of a full LAMP stack plus FTP & Mail (FM), Node, and provides an interactive service manager for developers.
@@ -8,15 +8,24 @@ LAMPFM is a Bash “app” for Debian/Ubuntu that automates installation of a fu
 ## 1. Features
 
 - **Automated Installation**  
-  • Apache2 web server  
-  • MySQL/MariaDB database server  
-  • PHP (with common extensions)  
-  • phpMyAdmin  
-  • Python 3 & pip  
-  • FTP client (`lftp`) & server (`vsftpd`)  
-  • Mail server (`postfix`)  
-  • Git version control
-  • Node.js
+
+      "Apache2|apache2"
+      "Database|mysql-server"
+      "PHP|php libapache2-mod-php php-mysql php-cli"
+      "phpMyAdmin|phpmyadmin"
+      "Python3|python3 python3-pip virtualenv"
+      "FTP Client|lftp"
+      "FTP Server|vsftpd"
+      "Mail Server|postfix"
+      "Git|git"
+      "Dev Tools|build-essential curl"
+      "Node.js|nodejs"
+      "Composer|composer"
+      "NVM|nvm"
+      "Docker|docker.io docker-compose"
+      "Firewall|ufw"
+      "Fail2Ban|fail2ban"
+      "SSL (Certbot)|certbot python3-certbot-apache"
 
 - **Service Manager**  
   • Detect which components are installed  
