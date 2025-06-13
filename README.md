@@ -1,7 +1,28 @@
-# SUPERLAMP — All-in-One LAMP + SUPER Stack Installer & Service Manager
-#### Author: Bocaletto Luca
+# SUPERLAMP — All-in-One LAMP + SUPER Stack Installer & Service Manager  
+**Author:** Bocaletto Luca  
 
-SUPERLAMP is a Bash “app” for Debian/Ubuntu that automates installation of a full LAMP stack plus FTP & Mail (FM), Node, and provides an interactive service manager for developers.
+SUPERLAMP is a Bash “app” for Debian/Ubuntu that automates, in one TUI-driven tool:  
+- Full LAMP stack (Apache2, MySQL/MariaDB, PHP + phpMyAdmin)  
+- FTP client/server (lftp, vsftpd) & Mail server (Postfix)  
+- Python 3 + pip/virtualenv, Git, build-essential & curl  
+- Node.js LTS via NodeSource, plus Composer & NVM  
+- Docker & Docker Compose  
+- Firewall (UFW) and intrusion protection (Fail2Ban)  
+- SSL provisioning (Certbot → Apache)  
+- “Smart” system maintenance:  
+  • TTL-based `apt update`  
+  • retry/backoff on APT failures  
+  • parallel downloads via `apt-fast`  
+  • unattended-upgrades for security patches  
+  • old-kernel cleanup & dist-upgrade  
+- Interactive Whiptail TUI for:  
+  • Selecting/installing components  
+  • Service status & start/stop/restart/enable/disable  
+  • Database setup wizard  
+  • New-site scaffolding & Apache vhost creation  
+- CLI flags: `--dry-run`, `--verbose`, `--help`  
+
+With SUPERLAMP you get a battle-tested, developer-friendly stack installer and service manager—perfect for rapid setup, safe automation and ongoing maintenance.  
 
 ---
 
