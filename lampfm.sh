@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 #
-# lampfm.sh — LAMP + FM + Node.js Stack Installer & Service Manager
-#
-# Installs or manages: Apache2, MySQL/MariaDB, PHP, phpMyAdmin, Python3, LFTP, vsftpd,
-# Postfix, Git, build-essential, curl, Node.js LTS.
-# Provides commands: install, status packages/services, start/stop/restart/enable/disable,
-# newsite, vhost add.
+# lampfm.sh — LAMP + FM + Node.js + Dev Tools Installer & TUI Manager
+# Implements: getopts, auto service mapping, whiptail TUI, DB wizard,
+# SSL automation, firewall (ufw & fail2ban), Composer, NVM, Docker.
 #
 
 set -euo pipefail
@@ -13,214 +10,234 @@ IFS=$'\n\t'
 
 LOGFILE="/var/log/lampfm.log"
 DATEFMT="+%Y-%m-%d %H:%M:%S"
+DRY_RUN=0
+VERBOSE=0
 
 # Colors
 RED="\e[31m"; GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RESET="\e[0m"
 
-# Ensure log file exists
-mkdir -p "$(dirname "$LOGFILE")"
-: >"$LOGFILE"
-
-# Components in order
-COMP_ORDER=(dev_tools apache2 database php phpmyadmin python ftp_client ftp_server mail git nodejs)
-declare -A COMPONENTS=(
-  [dev_tools]="build-essential curl"
-  [apache2]="apache2"
-  [database]="mysql-server"
-  [php]="php libapache2-mod-php php-mysql php-cli"
-  [phpmyadmin]="phpmyadmin"
-  [python]="python3 python3-pip virtualenv"
-  [ftp_client]="lftp"
-  [ftp_server]="vsftpd"
-  [mail]="postfix"
-  [git]="git"
-  [nodejs]="nodejs"
+# Components: name|apt-packages
+COMPONENTS=(
+  "Apache2|apache2"
+  "Database|mysql-server"
+  "PHP|php libapache2-mod-php php-mysql php-cli"
+  "phpMyAdmin|phpmyadmin"
+  "Python3|python3 python3-pip virtualenv"
+  "FTP Client|lftp"
+  "FTP Server|vsftpd"
+  "Mail Server|postfix"
+  "Git|git"
+  "Dev Tools|build-essential curl"
+  "Node.js|nodejs"
+  "Composer|composer"
+  "NVM|nvm"
+  "Docker|docker.io docker-compose"
+  "Firewall|ufw"
+  "Fail2Ban|fail2ban"
+  "SSL (Certbot)|certbot python3-certbot-apache"
 )
 
-SERVICES=(apache2 mysql vsftpd postfix)
+# Automatically discovered services from installed components
+declare -A SERVICE_MAP=(
+  [apache2]="apache2"
+  [mysql-server]="mysql"
+  [vsftpd]="vsftpd"
+  [postfix]="postfix"
+  [docker.io]="docker"
+  [fail2ban]="fail2ban"
+  [ufw]="ufw"
+)
 
 # Logging
 log() {
-  local level="$1"; shift
-  printf "%s [%s] %s\n" "$(date "$DATEFMT")" "$level" "$*" \
+  local lvl="$1"; shift
+  printf "%s [%s] %s\n" "$(date "$DATEFMT")" "$lvl" "$*" \
     | tee -a "$LOGFILE"
 }
-info()  { log INFO "$*"; }
-error() { log ERROR "$*"; echo -e "${RED}ERROR:${RESET} $*"; }
+info()  { log INFO "$*"; ((VERBOSE)) && echo -e "${BLUE}$*${RESET}"; }
+error() { log ERROR "$*"; echo -e "${RED}ERROR: $*${RESET}"; }
 
-# Pre-checks
+# Pre‐checks
 pre_checks() {
-  [ "$EUID" -ne 0 ] && { error "This script must be run as root"; exit 1; }
-  ping -c1 1.1.1.1 &>/dev/null || { error "No network connection"; exit 1; }
+  [ "$EUID" -ne 0 ] && { error "Run as root"; exit 1; }
+  ping -c1 1.1.1.1 &>/dev/null || { error "No network"; exit 1; }
+  command -v whiptail &>/dev/null || apt-get update -qq && apt-get install -y -qq whiptail
 }
 
-# System maintenance
+# System update & upgrade
 update_system() {
-  info "Updating package index"
-  apt-get update -qq
-  info "Upgrading installed packages"
-  DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
-  info "Dist-upgrade"
-  DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq
-  info "Autoremove unused packages"
-  apt-get autoremove -y -qq
-  info "Autoclean cache"
-  apt-get autoclean -qq
+  info "Updating package index..."
+  $dry_apt_update
+  info "Upgrading packages..."
+  $dry_apt_upgrade
 }
 
-# Add NodeSource repo
+# Dry-run wrappers
+dry_apt_update="apt-get update -qq"
+dry_apt_upgrade="DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq"
+dry_install="apt-get install -y -qq"
+run_or_dry() {
+  if (( DRY_RUN )); then
+    echo "[DRY-RUN] $*"
+  else
+    eval "$*"
+  fi
+}
+
+# Add NodeSource repo for Node.js LTS
 add_node_repo() {
-  if ! grep -q "nodesource" /etc/apt/sources.list.d/nodesource.list 2>/dev/null; then
-    info "Adding NodeSource repository"
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - &>>"$LOGFILE"
-  fi
+  info "Adding Node.js LTS repo"
+  run_or_dry "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -"
 }
 
-# Install all missing components
-install_all() {
+# Install selected components
+install_components() {
+  local sel pkgs comp
+  sel=$(whiptail --title "LAMPFM Installer" --checklist \
+    "Select components to install" 20 80 14 \
+    $(for c in "${COMPONENTS[@]}"; do
+        name="${c%%|*}"; pkgs="${c#*|}"
+        echo "\"$name\" \"${pkgs%% *}\" off"
+     done) 3>&1 1>&2 2>&3) || return
   update_system
-  info "Installing missing components"
-  for comp in "${COMP_ORDER[@]}"; do
-    [ "$comp" = nodejs ] && add_node_repo
-    for pkg in ${COMPONENTS[$comp]}; do
-      if ! dpkg -s "$pkg" &>/dev/null; then
-        info "Installing $pkg"
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg"
-      else
-        info "$pkg already installed"
+  for comp in $sel; do
+    for entry in "${COMPONENTS[@]}"; do
+      name="${entry%%|*}"; pkgs="${entry#*|}"
+      if [[ "$name" == "$comp" ]]; then
+        info "Installing $name"
+        [[ "$name" == "Node.js" ]] && add_node_repo
+        for pkg in $pkgs; do
+          if dpkg -s "$pkg" &>/dev/null; then
+            info "$pkg already installed"
+          else
+            run_or_dry "$dry_install $pkg"
+          fi
+        done
+        break
       fi
     done
   done
-  info "Enabling Apache rewrite module"
-  a2enmod rewrite &>/dev/null || true
-  info "Reloading Apache"
-  systemctl reload apache2
-  echo -e "${GREEN}All components installed and configured.${RESET}"
+  info "Enabling Apache mod_rewrite"
+  run_or_dry "a2enmod rewrite"
+  run_or_dry "systemctl reload apache2"
 }
 
-# Show package status
-status_packages() {
-  echo "Package status:"
-  for comp in "${COMP_ORDER[@]}"; do
-    for pkg in ${COMPONENTS[$comp]}; do
-      if dpkg -s "$pkg" &>/dev/null; then
-        printf "  [${GREEN}OK${RESET}] %s\n" "$pkg"
-      else
-        printf "  [${RED}MISSING${RESET}] %s\n" "$pkg"
-      fi
-    done
-  done
+# Virtual host SSL automation
+setup_ssl() {
+  local domain
+  domain=$(whiptail --inputbox "Enter your domain for SSL (example.com)" 8 60 3>&1 1>&2 2>&3) || return
+  info "Obtaining SSL cert for $domain"
+  run_or_dry "certbot --apache -d $domain --non-interactive --agree-tos -m admin@$domain"
 }
 
-# Show service status
-status_services() {
-  echo "Service status:"
-  for svc in "${SERVICES[@]}"; do
-    if systemctl list-unit-files | grep -q "^${svc}.service"; then
-      local state=$(systemctl is-active "$svc")
-      local enable=$(systemctl is-enabled "$svc" 2>/dev/null || echo disabled)
-      printf "  %s: %-8s (boot: %s)\n" \
-        "$svc" \
-        "$( [[ $state == active ]] && echo "${GREEN}running${RESET}" || echo "${RED}stopped${RESET}" )" \
-        "$enable"
-    else
-      printf "  %s: ${YELLOW}not installed${RESET}\n" "$svc"
+# Firewall & Fail2Ban
+configure_firewall() {
+  info "Configuring UFW"
+  run_or_dry "ufw allow OpenSSH"
+  run_or_dry "ufw allow 'WWW Full'"
+  run_or_dry "ufw allow ftp"
+  run_or_dry "ufw enable"
+}
+configure_fail2ban() {
+  info "Enabling Fail2Ban"
+  run_or_dry "systemctl enable fail2ban"
+  run_or_dry "systemctl start fail2ban"
+}
+
+# Database wizard
+db_wizard() {
+  local user pass db
+  user=$(whiptail --inputbox "New DB username" 8 40 3>&1 1>&2 2>&3) || return
+  pass=$(whiptail --passwordbox "Password for $user" 8 40 3>&1 1>&2 2>&3) || return
+  db=$(whiptail --inputbox "Database name" 8 40 3>&1 1>&2 2>&3) || return
+  info "Creating database & user"
+  run_or_dry "mysql -e \"CREATE DATABASE \\\`$db\\\`; GRANT ALL ON \\\`$db\\\`.* TO '$user'@'localhost' IDENTIFIED BY '$pass'; FLUSH PRIVILEGES;\""
+}
+
+# Composer & NVM
+install_composer() {
+  info "Installing Composer"
+  run_or_dry "curl -sS https://getcomposer.org/installer | php"
+  run_or_dry "mv composer.phar /usr/local/bin/composer"
+}
+install_nvm() {
+  info "Installing NVM"
+  run_or_dry "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.3/install.sh | bash"
+}
+
+# Docker support
+install_docker() {
+  info "Installing Docker & Compose"
+  run_or_dry "apt-get install -y -qq docker.io docker-compose"
+  run_or_dry "systemctl enable docker"
+  run_or_dry "systemctl start docker"
+}
+
+# Manage services using dialog
+manage_services() {
+  local choices sel svc act
+  # auto-discover services
+  choices=$(for s in "${!SERVICE_MAP[@]}"; do
+    pkg="$s"; svc="${SERVICE_MAP[$s]}"
+    if dpkg -s "$pkg" &>/dev/null; then
+      state=$(systemctl is-active "$svc")
+      echo "\"$svc\" \"$svc ($state)\" off"
     fi
+  done)
+  sel=$(whiptail --title "Service Manager" --checklist \
+    "Select services to start/stop/restart" 20 70 10 $choices 3>&1 1>&2 2>&3) || return
+  act=$(whiptail --title "Action" --menu \
+    "Choose action for selected" 12 40 4 \
+    "start" "Start services" \
+    "stop" "Stop services" \
+    "restart" "Restart services" 3>&1 1>&2 2>&3) || return
+  for svc in $sel; do
+    info "$act $svc"
+    run_or_dry "systemctl $act $svc"
   done
 }
 
-# Service control
-svc_action() {
-  local act="$1" svc="$2"
-  if ! systemctl list-unit-files | grep -q "^${svc}.service"; then
-    error "Service '$svc' not found"; return 1
-  fi
-  info "${act^}ing $svc"; systemctl "$act" "$svc"
-  echo -e "${GREEN}$svc ${act}ed${RESET}"
+# Main menu
+main_menu() {
+  while true; do
+    choice=$(whiptail --title "LAMPFM Main Menu" --menu "Choose an option" 16 60 8 \
+      "1" "Install Components" \
+      "2" "Manage Services" \
+      "3" "DB Setup Wizard" \
+      "4" "SSL Setup (Certbot)" \
+      "5" "Configure Firewall & Fail2Ban" \
+      "6" "Install Composer & NVM" \
+      "7" "Install Docker" \
+      "8" "Exit" 3>&1 1>&2 2>&3) || exit
+    case "$choice" in
+      1) install_components ;;
+      2) manage_services ;;
+      3) db_wizard ;;
+      4) setup_ssl ;;
+      5) configure_firewall; configure_fail2ban ;;
+      6) install_composer; install_nvm ;;
+      7) install_docker ;;
+      8) break ;;
+    esac
+  done
 }
 
-# Scaffold new site
-newsite() {
-  local name="$1"
-  local dir="/var/www/html/$name"
-  [ -d "$dir" ] && { error "Site '$name' already exists"; return 1; }
-  mkdir -p "$dir"
-  cat >"$dir/index.php" <<EOF
-<?php
-phpinfo();
-EOF
-  cat >"$dir/index.py" <<EOF
-#!/usr/bin/env python3
-print("Content-Type: text/plain\n")
-print("Hello from $name")
-EOF
-  chmod +x "$dir/index.py"
-  chown -R www-data:www-data "$dir"
-  echo -e "${GREEN}Site '$name' created at $dir${RESET}"
-}
-
-# Add Apache virtual host
-vhost_add() {
-  local domain="$1" path="$2"
-  local conf="/etc/apache2/sites-available/$domain.conf"
-  [ -f "$conf" ] && { error "vhost '$domain' exists"; return 1; }
-  cat >"$conf" <<EOF
-<VirtualHost *:80>
-  ServerName $domain
-  DocumentRoot $path
-  <Directory $path>
-    Options Indexes FollowSymLinks
-    AllowOverride All
-    Require all granted
-  </Directory>
-  ErrorLog \${APACHE_LOG_DIR}/$domain.error.log
-  CustomLog \${APACHE_LOG_DIR}/$domain.access.log combined
-</VirtualHost>
-EOF
-  a2ensite "$domain.conf"
-  systemctl reload apache2
-  echo -e "${GREEN}vhost '$domain' enabled${RESET}"
-}
-
-# Usage
-usage() {
-  cat <<EOF
-Usage: sudo $0 <command> [args]
-
-Commands:
-  install                     Install all missing components
-  status packages             Show installed/missing packages
-  status services             Show running/stopped services
-  start <service>             Start a service (apache2, mysql, vsftpd, postfix)
-  stop <service>              Stop a service
-  restart <service>           Restart a service
-  enable <service>            Enable service at boot
-  disable <service>           Disable service at boot
-  newsite <name>              Scaffold /var/www/html/<name>
-  vhost add <domain> <path>   Create & enable Apache vhost
-  help                        Show this help message
-EOF
-}
-
-# Main
-main() {
-  pre_checks
-  case "${1:-help}" in
-    install)                install_all ;;
-    status)
-      case "${2:-}" in
-        packages)           status_packages ;;
-        services)           status_services ;;
-        *)                  usage ;;
+# Parse options
+while getopts ":hnv-:" opt; do
+  case "$opt" in
+    h) echo "Usage: $0 [-n dry-run] [-v verbose]"; exit 0 ;;
+    n) DRY_RUN=1 ;;
+    v) VERBOSE=1 ;;
+    -)
+      case "${OPTARG}" in
+        dry-run) DRY_RUN=1 ;;
+        verbose) VERBOSE=1 ;;
+        help)    echo "Usage: $0 [--dry-run] [--verbose]"; exit 0 ;;
       esac ;;
-    start|stop|restart|enable|disable)
-                            svc_action "$1" "$2" ;;
-    newsite)                newsite "$2" ;;
-    vhost)
-      [ "${2:-}" = add ] && vhost_add "$3" "$4" || usage ;;
-    help|--help|-h)         usage ;;
-    *)                      usage ;;
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
   esac
-}
+done
 
-main "$@"
+pre_checks
+main_menu
+echo -e "${GREEN}Goodbye!${RESET}"
